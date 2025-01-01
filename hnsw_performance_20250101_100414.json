@@ -1,0 +1,22 @@
+{
+  "100": {
+    "insert_time": 30.691818237304688,
+    "k_results": {
+      "1": {
+        "avg_search_time": 0.004272937774658203,
+        "avg_recall": 1.0,
+        "num_queries": 1
+      },
+      "10": {
+        "avg_search_time": 0.006435394287109375,
+        "avg_recall": 1.0,
+        "num_queries": 1
+      },
+      "50": {
+        "avg_search_time": 0.006974458694458008,
+        "avg_recall": 0.8,
+        "num_queries": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "1": {
+    "avg_search_time": 0.01042795181274414,
+    "recall": 0.0,
+    "num_queries": 10
+  },
+  "5": {
+    "avg_search_time": 0.01051781177520752,
+    "recall": 0.0,
+    "num_queries": 10
+  },
+  "10": {
+    "avg_search_time": 0.010487174987792969,
+    "recall": 0.0,
+    "num_queries": 10
+  },
+  "20": {
+    "avg_search_time": 0.010408449172973632,
+    "recall": 0.0,
+    "num_queries": 10
+  },
+  "50": {
+    "avg_search_time": 0.009730768203735352,
+    "recall": 0.006,
+    "num_queries": 10
+  },
+  "100": {
+    "insert_time": 2.044970989227295,
+    "k_results": 
