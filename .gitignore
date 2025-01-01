@@ -1,0 +1,39 @@
+./data/*
+node_modules/*
+.DS_Store
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Dependencies
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build
+/bin/
+/dist/
+
+# Environment
+.env
+.env.local
+
+# Docker volumes
+/data/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
