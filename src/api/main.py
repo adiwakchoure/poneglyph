@@ -1,135 +1,127 @@
 """
-FastAPI service for vector search operations.
+FastAPI application for vector search with optimized HNSW implementation.
 """
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional, Dict
+from pydantic import BaseModel, Field
 import numpy as np
-import redis
-from minio import Minio
-from minio.error import S3Error
-import pickle
+from typing import List, Dict, Optional
+import logging
 import os
-from io import BytesIO
+import threading
+
+# Import HNSW implementation
+import sys
+import os.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from src.hnsw.core import HNSW
 
-app = FastAPI(title="Vector Search Service")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Initialize Redis connection
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "localhost"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    db=0
-)
+app = FastAPI(title="Vector Search API")
 
-# Initialize MinIO client
-minio_client = Minio(
-    os.getenv("MINIO_HOST", "localhost:9000"),
-    access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-    secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
-    secure=False
-)
+# Environment variables
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+MINIO_HOST = os.getenv("MINIO_HOST", "localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 
-# Initialize HNSW index
-VECTOR_DIM = int(os.getenv("VECTOR_DIM", 128))
-index = HNSW(dim=VECTOR_DIM)
+# Global state
+indices: Dict[int, HNSW] = {}
+index_lock = threading.Lock()
 
-BUCKET_NAME = "vectors"
-
-# Ensure bucket exists
-try:
-    if not minio_client.bucket_exists(BUCKET_NAME):
-        minio_client.make_bucket(BUCKET_NAME)
-except S3Error as e:
-    print(f"Error creating bucket: {e}")
-
-class Vector(BaseModel):
+class VectorRequest(BaseModel):
     id: int
     vector: List[float]
+    dimension: int
 
-class SearchQuery(BaseModel):
+class SearchRequest(BaseModel):
     vector: List[float]
-    k: int = 10
-    ef: int = 50
+    dimension: int
+    k: int = Field(default=10, gt=0)
 
 class SearchResult(BaseModel):
     id: int
     distance: float
 
-@app.post("/vectors/", status_code=201)
-async def add_vector(vector_data: Vector):
-    """Add a vector to the index and store in MinIO."""
-    try:
-        # Convert vector to numpy array
-        vector = np.array(vector_data.vector, dtype=np.float32)
-        
-        # Add to HNSW index
-        index.add(vector_data.id, vector)
-        
-        # Store vector in MinIO
-        vector_bytes = pickle.dumps(vector)
-        vector_data_stream = BytesIO(vector_bytes)
-        
-        minio_client.put_object(
-            BUCKET_NAME,
-            f"vector_{vector_data.id}",
-            vector_data_stream,
-            length=len(vector_bytes)
-        )
-        
-        # Store metadata in Redis
-        redis_client.hset(
-            f"vector:{vector_data.id}",
-            mapping={
-                "dim": str(VECTOR_DIM),
-                "created_at": str(np.datetime64('now'))
-            }
-        )
-        
-        return {"message": "Vector added successfully"}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def get_or_create_index(dimension: int) -> HNSW:
+    """Get existing index or create new one with optimized settings."""
+    with index_lock:
+        if dimension not in indices:
+            # Calculate optimal parameters based on dimension
+            M = min(64, max(16, int(dimension ** 0.5)))  # Scale M with dimension
+            ef_construction = max(100, min(400, dimension * 8))  # Scale ef with dimension
+            
+            indices[dimension] = HNSW(
+                dimension=dimension,
+                max_elements=1000000,  # Default to 1M vectors
+                M=M,
+                ef_construction=ef_construction,
+                ef=40,  # Default ef for search
+                redis_host=REDIS_HOST,
+                redis_port=REDIS_PORT,
+                minio_endpoint=MINIO_HOST,
+                minio_access_key=MINIO_ACCESS_KEY,
+                minio_secret_key=MINIO_SECRET_KEY,
+                bucket_prefix="vectors",  # Will create bucket like vectors-512
+                n_jobs=-1,  # Use all CPU cores
+                batch_size=1000  # Batch size for insertions
+            )
+            logger.info(f"Created new index for {dimension}d vectors with M={M}, ef_construction={ef_construction}")
+        return indices[dimension]
 
-@app.post("/search/", response_model=List[SearchResult])
-async def search_vectors(query: SearchQuery):
+@app.post("/vectors/")
+async def add_vector(request: VectorRequest):
+    """Add vector to the index."""
+    try:
+        vector = np.array(request.vector, dtype=np.float32)
+        index = get_or_create_index(request.dimension)
+        index.insert(request.id, vector)
+        return {"status": "success", "message": f"Vector {request.id} added successfully"}
+    except Exception as e:
+        logger.error(f"Error adding vector: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/search/")
+async def search_vectors(request: SearchRequest):
     """Search for similar vectors."""
     try:
-        query_vector = np.array(query.vector, dtype=np.float32)
-        results = index.search(query_vector, k=query.k, ef=query.ef)
+        vector = np.array(request.vector, dtype=np.float32)
+        index = get_or_create_index(request.dimension)
+        
+        results = index.search(vector, k=request.k)
         
         return [
-            SearchResult(id=idx, distance=float(dist))
-            for dist, idx in results
+            SearchResult(id=id, distance=float(dist))
+            for dist, id in results
         ]
-    
     except Exception as e:
+        logger.error(f"Error searching vectors: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/clear")
+async def clear_all_indices():
+    """Clear all indices."""
+    try:
+        with index_lock:
+            indices.clear()
+        return {"status": "success", "message": "All indices cleared"}
+    except Exception as e:
+        logger.error(f"Error clearing indices: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/vectors/{vector_id}")
-async def get_vector(vector_id: int):
-    """Retrieve a vector by ID."""
+@app.post("/clear/{dimension}")
+async def clear_index(dimension: int):
+    """Clear specific dimension index."""
     try:
-        # Get vector from MinIO
-        response = minio_client.get_object(
-            BUCKET_NAME,
-            f"vector_{vector_id}"
-        )
-        vector_bytes = response.read()
-        vector = pickle.loads(vector_bytes)
-        
-        # Get metadata from Redis
-        metadata = redis_client.hgetall(f"vector:{vector_id}")
-        
-        return {
-            "id": vector_id,
-            "vector": vector.tolist(),
-            "metadata": {k.decode(): v.decode() for k, v in metadata.items()}
-        }
-    
-    except minio.error.NoSuchKey:
-        raise HTTPException(status_code=404, detail="Vector not found")
+        with index_lock:
+            if dimension in indices:
+                del indices[dimension]
+        return {"status": "success", "message": f"Index for dimension {dimension} cleared"}
     except Exception as e:
+        logger.error(f"Error clearing index: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
